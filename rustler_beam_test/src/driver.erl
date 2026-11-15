@@ -8,9 +8,10 @@
 %%   to the node    <<M:8, Module:M/binary, L:16, Library:L/binary, Nifs/binary>>
 %%   to the binary  <<0>> | <<1, Reason/binary>>
 %%   to the node    <<Id:32, Test/binary>>
-%%   to the binary  <<Id:32, 0>> | <<Id:32, 1, Report/binary>>
+%%   to the binary  <<Id:32, 0>> | <<Id:32, Failure:8, Report/binary>>
 %%
-%% The first two load the library, and the other two run a test.
+%% The first two load the library, and the other two run a test. `Failure` is 2
+%% when the test panicked, and 1 when it failed in another way.
 -module(rustler_beam_test_driver).
 -export([main/1]).
 
@@ -18,6 +19,8 @@ main(Port) ->
     Options = [binary, {packet, 4}, {active, true}, {nodelay, true}],
     {ok, Socket} = gen_tcp:connect({127, 0, 0, 1}, Port, Options),
     receive
+        {tcp_closed, Socket} ->
+            halt();
         {tcp, Socket, <<M:8, Name:M/binary, L:16, Library:L/binary, Nifs/binary>>} ->
             Module = binary_to_atom(Name),
             Functions = [{binary_to_atom(Nif), Arity} || <<N:8, Nif:N/binary, Arity:8>> <= Nifs],
@@ -70,7 +73,8 @@ serve(Socket, Module, Running) ->
     end.
 
 verdict({verdict, ok}) -> [0];
-verdict({verdict, {error, Report}}) -> [1, Report];
+verdict({verdict, {failed, Report}}) -> [1, Report];
+verdict({verdict, {panicked, Report}}) -> [2, Report];
 verdict(Exit) -> [1, format("the process of the test exited with ~tp", [Exit])].
 
 %% A test NIF returns its verdict, or asks for the next message of its process
@@ -80,7 +84,7 @@ run(Module, Test, Step) ->
         {next_message, Continuation} ->
             receive
                 Message -> run(Module, Test, {Continuation, Message})
-            after 5000 -> {error, <<"no message arrived within 5 seconds">>}
+            after 5000 -> {failed, <<"no message arrived within 5 seconds">>}
             end;
         Verdict ->
             Verdict

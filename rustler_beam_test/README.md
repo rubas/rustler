@@ -56,7 +56,8 @@ NIFs of the crate, so it needs the `dynamic_symbols` feature to link.
 ## Tests
 
 A test takes no argument or a `rustler::Env`. It fails when it panics, or when
-it returns an `Err`. `#[ignore]` and `#[should_panic]` work as on a `#[test]`.
+it returns an `Err`. `#[ignore]` and `#[should_panic]` work as on a `#[test]`,
+and only a panic of the test itself satisfies `#[should_panic]`.
 
 Each test runs as one NIF call in a new process, on a normal scheduler, so
 the `Env` is bound to a process, as in a NIF. Tests of one test binary share

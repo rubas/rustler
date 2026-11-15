@@ -8,11 +8,11 @@ use std::panic::{self, AssertUnwindSafe};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, Once};
 
-use rustler::codegen_runtime::{c_char, c_int, ErlNifEnv, ErlNifTerm};
+use rustler::codegen_runtime::{ErlNifEnv, ErlNifTerm};
 use rustler::{Encoder, Env, Term};
 
 mod atoms {
-    rustler::atoms! { ok, error, next_message }
+    rustler::atoms! { ok, failed, panicked, next_message }
 }
 
 /// What a test function returns: `()`, a [`Receive`], or a `Result` of one of
@@ -24,7 +24,9 @@ pub trait Outcome {
 
 #[doc(hidden)]
 pub enum Step {
-    Done(Result<(), String>),
+    Passed,
+    Failed(String),
+    Panicked(String),
     Receive(Receive),
 }
 
@@ -48,7 +50,7 @@ where
 
 impl Outcome for () {
     fn into_step(self) -> Step {
-        Step::Done(Ok(()))
+        Step::Passed
     }
 }
 
@@ -62,7 +64,7 @@ impl<O: Outcome, E: Debug> Outcome for Result<O, E> {
     fn into_step(self) -> Step {
         match self {
             Ok(outcome) => outcome.into_step(),
-            Err(error) => Step::Done(Err(format!("returned an error: {error:?}"))),
+            Err(error) => Step::Failed(format!("returned an error: {error:?}")),
         }
     }
 }
@@ -72,21 +74,9 @@ impl<O: Outcome, E: Debug> Outcome for Result<O, E> {
 static WAITING: Mutex<BTreeMap<u64, Receive>> = Mutex::new(BTreeMap::new());
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
-pub const fn nif(
-    name: &'static str,
-    raw_func: unsafe extern "C" fn(*mut ErlNifEnv, c_int, *const ErlNifTerm) -> ErlNifTerm,
-) -> rustler::Nif {
-    rustler::Nif {
-        name: name.as_ptr() as *const c_char,
-        arity: 1,
-        flags: 0,
-        raw_func,
-    }
-}
-
 /// One call of a test NIF. Its argument is `start`, or `{Continuation,
 /// Message}` after it returned `{next_message, Continuation}`. It returns that,
-/// `ok`, or `{error, Report}`.
+/// `ok`, `{failed, Report}`, or `{panicked, Report}`.
 ///
 /// # Safety
 ///
@@ -113,8 +103,9 @@ pub unsafe fn step<O: Outcome>(
     });
 
     match step {
-        Step::Done(Ok(())) => atoms::ok().encode(env),
-        Step::Done(Err(report)) => (atoms::error(), report).encode(env),
+        Step::Passed => atoms::ok().encode(env),
+        Step::Failed(report) => (atoms::failed(), report).encode(env),
+        Step::Panicked(report) => (atoms::panicked(), report).encode(env),
         Step::Receive(receive) => {
             let continuation = NEXT.fetch_add(1, Ordering::Relaxed);
             WAITING.lock().unwrap().insert(continuation, receive);
@@ -125,12 +116,14 @@ pub unsafe fn step<O: Outcome>(
 }
 
 thread_local! {
-    /// Whether this thread runs a test, so that the panic hook keeps the report.
+    /// Whether this thread runs a test, so that the panic hook keeps the panic.
     static IN_TEST: Cell<bool> = const { Cell::new(false) };
-    static REPORT: RefCell<Option<String>> = const { RefCell::new(None) };
+    /// The message, the location, and the backtrace of the last panic of a
+    /// test on this thread.
+    static SEEN: RefCell<Option<(String, String, String)>> = const { RefCell::new(None) };
 }
 
-/// Runs a part of a test and turns a panic into a failure with the message and
+/// Runs a part of a test and turns a panic into a report with the message and
 /// location that `cargo test` shows for a panic.
 fn catch_panic(part: impl FnOnce() -> Step) -> Step {
     static HOOK: Once = Once::new();
@@ -140,27 +133,35 @@ fn catch_panic(part: impl FnOnce() -> Step) -> Step {
             if !IN_TEST.get() {
                 return default(info);
             }
-            let location = info
-                .location()
-                .map(|at| format!(" at {at}"))
-                .unwrap_or_default();
-            let message = info.payload_as_str().unwrap_or("Box<dyn Any>");
-            let mut report = format!("panicked in the BEAM{location}:\n{message}");
-            let backtrace = Backtrace::capture();
-            if backtrace.status() == BacktraceStatus::Captured {
-                report.push_str(&format!("\nstack backtrace:\n{backtrace}"));
+            let message = info.payload_as_str().unwrap_or("Box<dyn Any>").to_string();
+            let location = info.location().map(|at| format!(" at {at}"));
+            let mut backtrace = String::new();
+            let captured = Backtrace::capture();
+            if captured.status() == BacktraceStatus::Captured {
+                backtrace = format!("\nstack backtrace:\n{captured}");
             }
-            REPORT.set(Some(report));
+            SEEN.set(Some((message, location.unwrap_or_default(), backtrace)));
         }));
     });
 
     IN_TEST.set(true);
-    let step = panic::catch_unwind(AssertUnwindSafe(part));
+    SEEN.take();
+    let caught = panic::catch_unwind(AssertUnwindSafe(part));
     IN_TEST.set(false);
-    step.unwrap_or_else(|_| {
-        // `resume_unwind` skips the hook.
-        Step::Done(Err(REPORT
+    caught.unwrap_or_else(|payload| {
+        let message = payload
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| payload.downcast_ref::<&str>().copied())
+            .unwrap_or("Box<dyn Any>");
+        // The hook saw another panic, or none, when `resume_unwind` passes
+        // one on, for example from a thread that the test joined.
+        let (_, location, backtrace) = SEEN
             .take()
-            .unwrap_or_else(|| "panicked in the BEAM".into())))
+            .filter(|(seen, ..)| seen == message)
+            .unwrap_or_default();
+        Step::Panicked(format!(
+            "panicked in the BEAM{location}:\n{message}{backtrace}"
+        ))
     })
 }

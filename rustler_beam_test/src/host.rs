@@ -22,10 +22,16 @@ pub struct Test {
     /// The name of the test NIF.
     pub name: &'static str,
     pub manifest_dir: &'static str,
+    pub should_panic: bool,
 }
 
-/// A test passes, or fails with a report.
-type Verdict = Result<(), String>;
+struct Failure {
+    report: String,
+    /// Whether the test panicked, and did not fail in another way.
+    panicked: bool,
+}
+
+type Verdict = Result<(), Failure>;
 
 /// The node died, with `in_flight` tests waiting for their verdict.
 #[derive(Clone)]
@@ -48,18 +54,25 @@ pub fn run(test: &Test) {
         let _alone = GATE.write().unwrap();
         outcome = call(test);
     }
-    let verdict = outcome.unwrap_or_else(|death| {
-        Err(format!(
-            "the BEAM node died while it ran this test ({})",
-            death.status
-        ))
-    });
+    let failure = match outcome {
+        Ok(Ok(())) => return,
+        Ok(Err(failure)) => failure,
+        Err(death) => Failure {
+            report: format!(
+                "the BEAM node died while it ran this test ({})",
+                death.status
+            ),
+            panicked: false,
+        },
+    };
 
-    if let Err(report) = verdict {
-        // The report replaces the message of the panic hook, which would name
-        // this function as the place of the panic.
-        eprintln!("{report}");
-        panic::resume_unwind(Box::new(report));
+    // The report replaces the message of the panic hook, which would name
+    // this function as the place of the panic.
+    eprintln!("{}", failure.report);
+    // `#[should_panic]` passes on any panic of this function, but only a
+    // panic of the test may pass it. Without a panic here, it fails.
+    if failure.panicked || !test.should_panic {
+        panic::resume_unwind(Box::new(failure.report));
     }
 }
 
@@ -71,14 +84,18 @@ fn call(test: &Test) -> Result<Verdict, Death> {
     loop {
         let node = {
             let mut node = NODE.lock().unwrap();
-            let dead =
-                matches!(&*node, Some(Ok(node)) if node.state.lock().unwrap().death.is_some());
+            let dead = matches!(&*node, Some(Ok(node)) if node.state.lock().unwrap().dead);
             if node.is_none() || dead {
                 *node = Some(library(test).and_then(|library| Node::start(&library)));
             }
             match node.as_ref().unwrap() {
                 Ok(node) => node.clone(),
-                Err(error) => return Ok(Err(error.clone())),
+                Err(error) => {
+                    return Ok(Err(Failure {
+                        report: error.clone(),
+                        panicked: false,
+                    }))
+                }
             }
         };
         // The node can die before it takes the test. The next one takes it.
@@ -142,6 +159,33 @@ fn build(test: &Test) -> Result<PathBuf, String> {
         .ok_or_else(|| format!("{} builds no `cdylib`", manifest.display()))
 }
 
+/// The first frame for the node: the module, the library, and the NIFs that
+/// the module must define.
+fn load_request(library: &Path) -> Result<Vec<u8>, String> {
+    let mut modules = inventory::iter::<NifModule>.into_iter();
+    let (Some(NifModule(module)), None) = (modules.next(), modules.next()) else {
+        return Err("the crate needs one `rustler::init!`".into());
+    };
+    // `erlang:load_nif/2` adds the extension itself.
+    let path = library.with_extension("");
+    let path = path
+        .to_str()
+        .ok_or("the path of the library is not UTF-8")?;
+
+    let mut request = vec![module.len() as u8];
+    request.extend_from_slice(module.as_bytes());
+    request.extend_from_slice(&(path.len() as u16).to_be_bytes());
+    request.extend_from_slice(path.as_bytes());
+    // This binary holds the same NIFs as the library.
+    for nif in inventory::iter::<rustler::Nif> {
+        let name = unsafe { CStr::from_ptr(nif.name) }.to_bytes();
+        request.push(name.len() as u8);
+        request.extend_from_slice(name);
+        request.push(nif.arity as u8);
+    }
+    Ok(request)
+}
+
 struct Node {
     /// Writes hold the lock of `state`, so frames don't mix.
     stream: TcpStream,
@@ -152,7 +196,7 @@ struct Node {
 struct State {
     next_id: u32,
     waiting: HashMap<u32, Sender<Result<Verdict, Death>>>,
-    death: Option<Death>,
+    dead: bool,
 }
 
 /// Evaluated by `erl`: compiles and runs the driver.
@@ -166,10 +210,12 @@ impl Node {
     fn start(library: &Path) -> Result<Arc<Node>, String> {
         let io = |error: io::Error| format!("cannot start the BEAM node: {error}");
 
+        let load = load_request(library)?;
         let driver = library.with_file_name("rustler_beam_test_driver.erl");
         fs::write(&driver, include_str!("driver.erl")).map_err(io)?;
         let listener = TcpListener::bind(("127.0.0.1", 0)).map_err(io)?;
         let port = listener.local_addr().map_err(io)?.port();
+        // The node stops when its connection to this process closes.
         let mut child = Command::new("erl")
             .args(["-noshell", "-noinput", "-eval", BOOT, "-extra"])
             .arg(&driver)
@@ -195,26 +241,6 @@ impl Node {
         stream.set_nonblocking(false).map_err(io)?;
         stream.set_nodelay(true).map_err(io)?;
 
-        let mut modules = inventory::iter::<NifModule>.into_iter();
-        let (Some(NifModule(module)), None) = (modules.next(), modules.next()) else {
-            return Err("the crate needs one `rustler::init!`".into());
-        };
-        // `erlang:load_nif/2` adds the extension itself.
-        let path = library.with_extension("");
-        let path = path
-            .to_str()
-            .ok_or("the path of the library is not UTF-8")?;
-        let mut load = vec![module.len() as u8];
-        load.extend_from_slice(module.as_bytes());
-        load.extend_from_slice(&(path.len() as u16).to_be_bytes());
-        load.extend_from_slice(path.as_bytes());
-        // This binary holds the same NIFs as the library.
-        for nif in inventory::iter::<rustler::Nif> {
-            let name = unsafe { CStr::from_ptr(nif.name) }.to_bytes();
-            load.push(name.len() as u8);
-            load.extend_from_slice(name);
-            load.push(nif.arity as u8);
-        }
         match write_frame(&stream, &load).and_then(|()| read_frame(&mut stream)) {
             Ok(answer) if answer == [0] => {}
             Ok(answer) => {
@@ -247,7 +273,7 @@ impl Node {
     /// Sends a test to the node. Returns `None` when the node is dead.
     fn request(&self, test: &str) -> Option<Receiver<Result<Verdict, Death>>> {
         let mut state = self.state.lock().unwrap();
-        if state.death.is_some() {
+        if state.dead {
             return None;
         }
         let id = state.next_id;
@@ -265,7 +291,11 @@ impl Node {
             let (id, verdict) = frame.split_at(4);
             let verdict = match verdict {
                 [0] => Ok(()),
-                _ => Err(String::from_utf8_lossy(&verdict[1..]).into_owned()),
+                [failure, report @ ..] => Err(Failure {
+                    report: String::from_utf8_lossy(report).into_owned(),
+                    panicked: *failure == 2,
+                }),
+                [] => unreachable!("the driver sends a verdict in each frame"),
             };
             let id = u32::from_be_bytes(id.try_into().unwrap());
             if let Some(sender) = self.state.lock().unwrap().waiting.remove(&id) {
@@ -273,25 +303,29 @@ impl Node {
             }
         }
 
-        let status = wait(&mut child);
-        let mut state = self.state.lock().unwrap();
-        let death = Death {
-            status,
-            in_flight: state.waiting.len(),
+        // From here on, no test starts on this node, so the tests that wait
+        // now are the ones that it ran when it died.
+        let in_flight = {
+            let mut state = self.state.lock().unwrap();
+            state.dead = true;
+            state.waiting.len()
         };
-        if death.in_flight > 1 {
+        let death = Death {
+            status: wait(&mut child),
+            in_flight,
+        };
+        if in_flight > 1 {
             // Not `eprintln!`, whose output belongs to the test that started
             // this thread.
             let _ = writeln!(
                 io::stderr(),
-                "rustler_beam_test: the BEAM node died ({}) with {} tests in flight, so each of them runs again alone",
-                death.status, death.in_flight
+                "rustler_beam_test: the BEAM node died ({}) with {in_flight} tests in flight, so each of them runs again alone",
+                death.status
             );
         }
-        for (_, sender) in state.waiting.drain() {
+        for (_, sender) in self.state.lock().unwrap().waiting.drain() {
             let _ = sender.send(Err(death.clone()));
         }
-        state.death = Some(death);
     }
 }
 
