@@ -52,4 +52,6 @@ fn factorial_async(env: Env, n: u64) -> Atom {
 rustler::init!("Elixir.BeamTestDemo");
 
 #[cfg(any(test, feature = "beam_test"))]
+mod ported;
+#[cfg(any(test, feature = "beam_test"))]
 mod tests;

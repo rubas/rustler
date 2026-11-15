@@ -140,7 +140,10 @@ fn catch_panic(part: impl FnOnce() -> Step) -> Step {
             if !IN_TEST.get() {
                 return default(info);
             }
-            let location = info.location().map(|at| format!(" at {at}")).unwrap_or_default();
+            let location = info
+                .location()
+                .map(|at| format!(" at {at}"))
+                .unwrap_or_default();
             let message = info.payload_as_str().unwrap_or("Box<dyn Any>");
             let mut report = format!("panicked in the BEAM{location}:\n{message}");
             let backtrace = Backtrace::capture();
@@ -156,6 +159,8 @@ fn catch_panic(part: impl FnOnce() -> Step) -> Step {
     IN_TEST.set(false);
     step.unwrap_or_else(|_| {
         // `resume_unwind` skips the hook.
-        Step::Done(Err(REPORT.take().unwrap_or_else(|| "panicked in the BEAM".into())))
+        Step::Done(Err(REPORT
+            .take()
+            .unwrap_or_else(|| "panicked in the BEAM".into())))
     })
 }

@@ -71,7 +71,8 @@ fn call(test: &Test) -> Result<Verdict, Death> {
     loop {
         let node = {
             let mut node = NODE.lock().unwrap();
-            let dead = matches!(&*node, Some(Ok(node)) if node.state.lock().unwrap().death.is_some());
+            let dead =
+                matches!(&*node, Some(Ok(node)) if node.state.lock().unwrap().death.is_some());
             if node.is_none() || dead {
                 *node = Some(library(test).and_then(|library| Node::start(&library)));
             }
@@ -134,7 +135,10 @@ fn build(test: &Test) -> Result<PathBuf, String> {
         })
         .flat_map(|message| message["filenames"].as_array().cloned().unwrap_or_default())
         .filter_map(|file| file.as_str().map(PathBuf::from))
-        .find(|file| file.extension().is_some_and(|extension| extension == env::consts::DLL_EXTENSION))
+        .find(|file| {
+            file.extension()
+                .is_some_and(|extension| extension == env::consts::DLL_EXTENSION)
+        })
         .ok_or_else(|| format!("{} builds no `cdylib`", manifest.display()))
 }
 
@@ -197,7 +201,9 @@ impl Node {
         };
         // `erlang:load_nif/2` adds the extension itself.
         let path = library.with_extension("");
-        let path = path.to_str().ok_or("the path of the library is not UTF-8")?;
+        let path = path
+            .to_str()
+            .ok_or("the path of the library is not UTF-8")?;
         let mut load = vec![module.len() as u8];
         load.extend_from_slice(module.as_bytes());
         load.extend_from_slice(&(path.len() as u16).to_be_bytes());
@@ -262,8 +268,9 @@ impl Node {
                 _ => Err(String::from_utf8_lossy(&verdict[1..]).into_owned()),
             };
             let id = u32::from_be_bytes(id.try_into().unwrap());
-            let sender = self.state.lock().unwrap().waiting.remove(&id);
-            let _ = sender.unwrap().send(Ok(verdict));
+            if let Some(sender) = self.state.lock().unwrap().waiting.remove(&id) {
+                let _ = sender.send(Ok(verdict));
+            }
         }
 
         let status = wait(&mut child);

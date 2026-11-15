@@ -35,7 +35,10 @@ fn strings_and_binaries_round_trip(env: Env) {
     let term = "Grüezi".encode(env);
     assert!(term.is_binary());
     assert_eq!(term.decode::<String>().unwrap(), "Grüezi");
-    assert_eq!(term.decode::<Binary>().unwrap().as_slice(), "Grüezi".as_bytes());
+    assert_eq!(
+        term.decode::<Binary>().unwrap().as_slice(),
+        "Grüezi".as_bytes()
+    );
 }
 
 #[rustler_beam_test::test]
@@ -44,7 +47,10 @@ fn atoms_round_trip(env: Env) {
     assert_eq!(term.atom_to_string().unwrap(), "hello");
     assert_eq!(term.decode::<Atom>().unwrap(), atoms::hello());
     assert_eq!(Atom::from_str(env, "hello").unwrap(), atoms::hello());
-    assert_eq!(true.encode(env).decode::<Atom>().unwrap(), rustler::types::atom::true_());
+    assert_eq!(
+        true.encode(env).decode::<Atom>().unwrap(),
+        rustler::types::atom::true_()
+    );
 }
 
 #[rustler_beam_test::test]
@@ -72,7 +78,13 @@ fn maps_round_trip(env: Env) {
 
     let point = Point { x: 3, y: -4 };
     let term = point.encode(env);
-    assert_eq!(term.map_get(Atom::from_str(env, "y").unwrap()).unwrap().decode::<i64>().unwrap(), -4);
+    assert_eq!(
+        term.map_get(Atom::from_str(env, "y").unwrap())
+            .unwrap()
+            .decode::<i64>()
+            .unwrap(),
+        -4
+    );
     assert_eq!(term.decode::<Point>().unwrap(), point);
 }
 
@@ -96,7 +108,10 @@ fn a_message_to_self_arrives(env: Env) -> Receive {
     env.send(&pid, (atoms::hello(), 42)).unwrap();
 
     receive(|_env, message| {
-        assert_eq!(message.decode::<(Atom, i64)>().unwrap(), (atoms::hello(), 42));
+        assert_eq!(
+            message.decode::<(Atom, i64)>().unwrap(),
+            (atoms::hello(), 42)
+        );
     })
 }
 
@@ -126,7 +141,11 @@ fn messages_arrive_in_the_order_sent(env: Env) -> Receive {
 #[rustler_beam_test::test]
 #[should_panic(expected = "the BEAM lost our number")]
 fn a_panic_in_the_beam_fails_the_test(env: Env) {
-    assert_eq!(1.encode(env).decode::<i64>().unwrap(), 2, "the BEAM lost our number");
+    assert_eq!(
+        1.encode(env).decode::<i64>().unwrap(),
+        2,
+        "the BEAM lost our number"
+    );
 }
 
 /// `cargo test -p beam_test_demo -- --ignored fails_on_purpose` shows the
@@ -134,7 +153,11 @@ fn a_panic_in_the_beam_fails_the_test(env: Env) {
 #[rustler_beam_test::test]
 #[ignore = "fails on purpose"]
 fn fails_on_purpose(env: Env) {
-    assert_eq!(1.encode(env).decode::<i64>().unwrap(), 2, "the BEAM lost our number");
+    assert_eq!(
+        1.encode(env).decode::<i64>().unwrap(),
+        2,
+        "the BEAM lost our number"
+    );
 }
 
 /// `cargo test -p beam_test_demo -- --ignored crashes_on_purpose` shows the
