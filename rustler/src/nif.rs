@@ -26,3 +26,9 @@ impl Nif {
 unsafe impl Sync for Nif {}
 
 inventory::collect!(Nif);
+
+/// The module that a library registers its NIFs for, as given to `init!`.
+/// A test runner reads it to load the library into a module of that name.
+pub struct NifModule(pub &'static str);
+
+inventory::collect!(NifModule);

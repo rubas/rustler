@@ -150,6 +150,8 @@ impl From<InitMacroInput> for proc_macro2::TokenStream {
             }
 
             #maybe_primary_nif_init
+
+            rustler::codegen_runtime::inventory::submit!(rustler::codegen_runtime::NifModule(#name));
         }
     }
 }

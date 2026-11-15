@@ -13,6 +13,9 @@ pub use inventory;
 // Re-export of resource registration
 pub use crate::resource::Registration as ResourceRegistration;
 
+// The module name that `rustler::init!` records for test runners.
+pub use crate::nif::NifModule;
+
 // Names used by the `rustler::init!` macro or other generated code.
 pub use crate::sys::{c_char, c_int, c_uint, c_void};
 
